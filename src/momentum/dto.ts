@@ -8,6 +8,7 @@
 // is a different check: a patch can be individually well-formed and still leave every
 // weight at zero.
 
+import type { AlertSettingsPatch } from './alerts/settings.js';
 import type { DeepPartial } from './config/config.repository.js';
 import type {
   FactorKey, MomentumConfig, MomentumRow, SignalAction, SignalState, TrendPhase,
@@ -303,6 +304,79 @@ export function parseConfigPatch(body: unknown): DeepPartial<MomentumConfig> {
   // The server owns provenance; a client cannot set its own version or author.
   const { version: _v, updatedAt: _a, updatedBy: _b, ...patch } = body as Record<string, unknown>;
   return patch as DeepPartial<MomentumConfig>;
+}
+
+/**
+ * The alert panel's patch - four settings, and every one of them optional.
+ *
+ * Stricter than `parseConfigPatch` on purpose. That endpoint edits a scoring model whoever opens
+ * it is expected to understand in detail, so it validates the shape and lets the repository
+ * repair the values; this one is wired to two switches and two sliders, and a floor arriving as
+ * "82%" or 8200 should come back as an error naming the field rather than as a channel that
+ * quietly stops alerting. The gates ignore anything outside 0-100, so an accepted nonsense value
+ * would not be obeyed - it would simply be invisible.
+ */
+export function parseAlertSettingsPatch(body: unknown): AlertSettingsPatch {
+  if (!isPlainObject(body)) throw new ValidationError(['body must be a JSON object']);
+
+  const issues: string[] = [];
+  const patch: AlertSettingsPatch = {};
+
+  for (const key of Object.keys(body))
+    if (key !== 'trendDay' && key !== 'ignition') issues.push(`unknown field "${key}"`);
+
+  const bool = (v: unknown, path: string): boolean | undefined => {
+    if (v === undefined) return undefined;
+    if (typeof v === 'boolean') return v;
+    // 'on'/'off' accepted because that is what the env file uses, and anyone reaching this API
+    // after reading .env will reach for them.
+    const s = String(v).trim().toLowerCase();
+    if (s === 'on' || s === 'true') return true;
+    if (s === 'off' || s === 'false') return false;
+    issues.push(`${path} must be true or false`);
+    return undefined;
+  };
+
+  const floor = (v: unknown, path: string): number | undefined => {
+    if (v === undefined) return undefined;
+    const n = Number(v);
+    if (!Number.isFinite(n) || n < 0 || n > 100) {
+      issues.push(`${path} must be a number between 0 and 100`);
+      return undefined;
+    }
+    // Rounded rather than refused: both scores are integers everywhere they are produced and
+    // compared, so an 82.5 off a slider is a precision the model does not have, not an error.
+    return Math.round(n);
+  };
+
+  if ('trendDay' in body) {
+    const t = body.trendDay;
+    if (!isPlainObject(t)) issues.push('trendDay must be an object');
+    else {
+      const enabled = bool(t.enabled, 'trendDay.enabled');
+      const minConviction = floor(t.minConviction, 'trendDay.minConviction');
+      patch.trendDay = {
+        ...(enabled === undefined ? {} : { enabled }),
+        ...(minConviction === undefined ? {} : { minConviction }),
+      };
+    }
+  }
+
+  if ('ignition' in body) {
+    const g = body.ignition;
+    if (!isPlainObject(g)) issues.push('ignition must be an object');
+    else {
+      const enabled = bool(g.enabled, 'ignition.enabled');
+      const minEntryQuality = floor(g.minEntryQuality, 'ignition.minEntryQuality');
+      patch.ignition = {
+        ...(enabled === undefined ? {} : { enabled }),
+        ...(minEntryQuality === undefined ? {} : { minEntryQuality }),
+      };
+    }
+  }
+
+  if (issues.length) throw new ValidationError(issues);
+  return patch;
 }
 
 /** Re-exported for the controller's error mapping. */

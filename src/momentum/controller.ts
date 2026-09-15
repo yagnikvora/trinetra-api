@@ -17,6 +17,9 @@ import type { MomentumBoard, MomentumRow } from './types.js';
 import { configRepository } from './config/config.repository.js';
 import { buildMessages, previewAlerts, trendAlertStatus } from './alerts/trend-day.js';
 import { ignitionAlertStatus } from './alerts/ignition.js';
+import {
+  alertSettingsState, ensureAlertOverrides, resetAlertSettings, saveAlertSettings,
+} from './alerts/settings.js';
 import { displacementAlertStatus } from './alerts/displacement.js';
 import {
   exitLab, journalBoot, journalExitNow, journalPatch, journalRange, journalSettleDue,
@@ -36,7 +39,10 @@ import { historyRepository } from './data/history.repository.js';
 import { noteBaselineFailure, scanOnce, schedulerStatus } from './scheduler.js';
 import { seedSession } from './data/session-seed.js';
 import { cache, single } from './cache.js';
-import { applySignalFilters, isValidationError, parseBoardQuery, parseConfigPatch, parseSymbol } from './dto.js';
+import {
+  applySignalFilters, isValidationError, parseAlertSettingsPatch, parseBoardQuery, parseConfigPatch,
+  parseSymbol,
+} from './dto.js';
 import { istDay, marketOpen } from './session.js';
 import { tokenSet } from '../upstox.js';
 
@@ -313,8 +319,48 @@ export function momentumRouter(): express.Router {
     send(res, next, 'upstox');
   });
 
+  // ----------------------------------------------- GET /momentum/alerts/settings ----
+  //
+  // The two phone channels' switches. Their own endpoints rather than a section of
+  // `/momentum/config`, because they are not part of the scoring model: saving the config bumps
+  // its version, stamps an author and invalidates the cached board so every row is re-scored,
+  // and none of that is the right response to somebody muting a channel for an afternoon.
+  //
+  // `ensureAlertOverrides` before every one of these, for the same reason it is called before the
+  // channels run: the record is read from disk exactly once per process and nothing guarantees a
+  // scan happened first, so a panel opened on a freshly booted server would otherwise report the
+  // .env settings while the first scan was still on its way to applying the stored ones.
+  router.get('/alerts/settings', async (_req, res) => {
+    await ensureAlertOverrides();
+    send(res, alertSettingsState(), 'upstox');
+  });
+
+  // ----------------------------------------------- PUT /momentum/alerts/settings ----
+  // Partial: a body of `{ "trendDay": { "enabled": false } }` mutes that channel and leaves the
+  // other three settings exactly as they were, so the panel can save one switch without having to
+  // hold and re-send a consistent view of all four.
+  router.put('/alerts/settings', async (req: Request, res: Response) => {
+    try {
+      const patch = parseAlertSettingsPatch(req.body);
+      const by = String(req.header('x-admin-user') ?? 'admin');
+      send(res, await saveAlertSettings(patch, by), 'upstox');
+    } catch (e) {
+      if (isValidationError(e)) return fail(res, 400, e.message, { issues: e.issues });
+      fail(res, 500, String((e as Error).message));
+    }
+  });
+
+  // ---------------------------------------- POST /momentum/alerts/settings/reset ----
+  // Hands all four settings back to the server's own .env. The deploy stays the default; this
+  // endpoint is what makes that true rather than a claim, since without it an override applied
+  // once could never be taken off for the life of the process.
+  router.post('/alerts/settings/reset', async (_req, res) => {
+    send(res, await resetAlertSettings(), 'upstox');
+  });
+
   // --------------------------------------------------------- GET /momentum/status ----
   router.get('/status', async (_req, res) => {
+    await ensureAlertOverrides();
     const [status, baseline, cfg] = await Promise.all([schedulerStatus(), getBaseline(), configRepository.get()]);
     send(res, {
       ...status,

@@ -70,6 +70,7 @@ import {
 import { onScan } from '../alerts/trend-day.js';
 import { onScan as onIgnition } from '../alerts/ignition.js';
 import { onScan as onDisplacement, type DisplacementInput } from '../alerts/displacement.js';
+import { ensureAlertOverrides } from '../alerts/settings.js';
 import type { ConvictionReading } from '../types.js';
 import { buildSignal, buildTrendDayPlan, gateTradeType, type SignalInputs } from './signal.service.js';
 import { institutionalActivity, scoreRow } from './score.service.js';
@@ -672,6 +673,10 @@ export async function runScan(cfg: MomentumConfig, nowMs = Date.now()): Promise<
   // ATR comes only from here — so a scan that ran during the morning build, or after a restart
   // that found no baseline on disk, can produce Confirmed rows it cannot price. The alert decides
   // what to do about that; what this call has to do is stop pretending the question never arose.
+  // Whatever the UI has set these channels to, before any of them is asked whether it is on.
+  // A disk read once per process; see alerts/settings.ts for why it is here and not at boot.
+  if (open) await ensureAlertOverrides();
+
   if (open) await onScan(rows, trendPlans, cfg, nowMs, baseline !== null);
 
   // And anything whose move has just STARTED. Separate call rather than a branch inside the one

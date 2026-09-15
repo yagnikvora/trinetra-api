@@ -48,7 +48,8 @@ import { sendTelegram, telegramConfigured } from '../../alerts/telegram.js';
 
 /* ------------------------------------------------------------------------ the gate --- */
 
-const enabled = (): boolean => (process.env.IGNITION_ALERTS ?? '').trim().toLowerCase() === 'on';
+/** Exported for `alerts/settings.ts`, for the reason given on the trend-day channel's pair. */
+export const enabled = (): boolean => (process.env.IGNITION_ALERTS ?? '').trim().toLowerCase() === 'on';
 
 /**
  * The entry-quality floor.
@@ -59,8 +60,10 @@ const enabled = (): boolean => (process.env.IGNITION_ALERTS ?? '').trim().toLowe
  * better. `entryQuality` is bounded 0–100, so anything outside that is ignored rather than obeyed.
  */
 export const minEntryQuality = (): number => {
-  const raw = Number(process.env.IGNITION_ALERT_MIN_EQ);
-  return Number.isFinite(raw) && raw >= 0 && raw <= 100 ? raw : 80;
+  // Blank reads as unset, not as zero — see the note on the trend-day channel's `minConviction`.
+  const raw = (process.env.IGNITION_ALERT_MIN_EQ ?? '').trim();
+  const n = Number(raw);
+  return raw !== '' && Number.isFinite(n) && n >= 0 && n <= 100 ? n : 80;
 };
 
 /**

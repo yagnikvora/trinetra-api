@@ -55,6 +55,7 @@ import { buildSignal } from '../src/momentum/engine/signal.service.js';
 // The live alert's own gate, imported rather than re-described — see `ignitionFeed`.
 import { ENTRY_STATES, minEntryQuality } from '../src/momentum/alerts/ignition.js';
 import { minConviction } from '../src/momentum/alerts/trend-day.js';
+import { ensureAlertOverrides } from '../src/momentum/alerts/settings.js';
 import { observe, type SessionState } from '../src/momentum/data/session-state.js';
 import { isoDaysBefore, istDay, minuteOfSession } from '../src/momentum/session.js';
 import type { ConvictionReading, MomentumConfig, MomentumSignal } from '../src/momentum/types.js';
@@ -1159,6 +1160,11 @@ async function main() {
   // raised it" question costs a flag rather than a config change that then has to be remembered
   // and undone. `minConviction()` reads process.env on every call, so setting it here — after the
   // env file has already been loaded at import — is what the whole run then sees.
+  // Whatever the UI panel has set, first — so a replay is measured at the floor the live channel
+  // is actually running at rather than at whatever `.env` said before somebody moved the slider.
+  // `--conv` is applied after this and therefore still wins, which is the order that flag needs.
+  await ensureAlertOverrides();
+
   const convIdx = args.indexOf('--conv');
   const convArg = Number(convIdx >= 0 ? args[convIdx + 1] : NaN);
   if (Number.isFinite(convArg) && convArg >= 0 && convArg <= 100)

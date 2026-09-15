@@ -75,6 +75,14 @@ export const STORE_KEYS = {
    */
   ignitionAlerts: 'ignition_alerts',
   /**
+   * The trend-day and ignition channels' switches, as set from the UI. See alerts/settings.js.
+   *
+   * Holds only what somebody has actually CHANGED — a field absent from it falls back to what
+   * `.env` supplied at boot — so a deployment that has never opened the panel behaves exactly as
+   * it did before this key existed, and deleting the file restores the server's own settings.
+   */
+  alertSettings: 'alert_settings',
+  /**
    * Which first-hour displacement signals have been announced today. See alerts/displacement.js.
    *
    * Its own key for the same reason `ignitionAlerts` has one: the three channels are switched on

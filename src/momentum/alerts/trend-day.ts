@@ -97,7 +97,9 @@ const MAX_MESSAGES = 3;
 
 /* ------------------------------------------------------------------------ the gate --- */
 
-const enabled = (): boolean => (process.env.TREND_DAY_ALERTS ?? '').trim().toLowerCase() !== 'off';
+// Exported so `alerts/settings.ts` can report what the channel is ACTUALLY set to without
+// re-deriving the rule. That module writes the environment this reads; it never reads it itself.
+export const enabled = (): boolean => (process.env.TREND_DAY_ALERTS ?? '').trim().toLowerCase() !== 'off';
 
 /**
  * The conviction floor, at confirmation.
@@ -107,8 +109,13 @@ const enabled = (): boolean => (process.env.TREND_DAY_ALERTS ?? '').trim().toLow
  * `Confirmed` early and has been decaying inside the fade hysteresis ever since.
  */
 export const minConviction = (): number => {
-  const raw = Number(process.env.TREND_DAY_ALERT_MIN_CONVICTION);
-  return Number.isFinite(raw) && raw >= 0 && raw <= 100 ? raw : 65;
+  // BLANK IS NOT ZERO. `Number('')` is 0, which is finite and in range, so an env line left as
+  // `TREND_DAY_ALERT_MIN_CONVICTION=` — the obvious way to clear a setting by hand — used to read
+  // as a floor of zero and announce every confirmation on the board. An unset setting means the
+  // default, and a floor of 0 has to be asked for by writing it.
+  const raw = (process.env.TREND_DAY_ALERT_MIN_CONVICTION ?? '').trim();
+  const n = Number(raw);
+  return raw !== '' && Number.isFinite(n) && n >= 0 && n <= 100 ? n : 65;
 };
 
 /* ----------------------------------------------------------------------- the state --- */
