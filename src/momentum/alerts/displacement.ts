@@ -122,16 +122,18 @@ const allowCarried = (): boolean =>
  * and pays a second lot of charges for the privilege.
  *
  * What replaced it: hold the whole position, and once it has been up `armAt`, move the stop once to
- * `lock` and leave it there. That nets ₹79,147 on the same 78 trades, and still leads by ₹13,488
- * if every stop is assumed to fill at the low of the bar that triggered it. `armAt` is deliberately
- * mid-plateau — every trigger from +12% to +26% beats the flat rule, so the exact number is not
- * load-bearing.
+ * `lock` and leave it there. That netted ₹79,147 on the same 78 trades.
+ *
+ * AND THAT WAS SWITCHED OFF TOO (2026-09-19). On all 194 trades from 1 Jul to 18 Sep the checkpoint
+ * nets ₹1,52,977 against ₹1,70,226 for plain +80/−50, so the message now says only: sell all at
+ * +80% or 15:15, hard stop −50%. `armAt` defaults to 0 here and in `journalConfig`, and the two
+ * must stay equal, or the journal grades a rule the alert never told anyone to follow.
  */
 export const exits = () => ({
   second: num('DISPLACEMENT_TP2_PCT', 80, 1, 1000) / 100,
   stop: num('DISPLACEMENT_SL_PCT', 50, 1, 99) / 100,
   /** Once up this much, the stop moves once — to `lock` — and never moves again. 0 switches it off. */
-  armAt: num('DISPLACEMENT_ARM_AT_PCT', 24, 0, 1000) / 100,
+  armAt: num('DISPLACEMENT_ARM_AT_PCT', 0, 0, 1000) / 100,
   /**
    * Where the stop parks once armed. Comfortably above cost, so a checkpoint exit is a small win
    * rather than a scratch. See `journalConfig` for the grading behind the number and for why this

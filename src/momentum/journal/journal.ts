@@ -55,6 +55,8 @@ import {
   databaseUrl, getPool, PostgresJournalRepository, savePaths, type OptionPathRow,
 } from './postgres.js';
 import { store, STORE_KEYS } from '../store.js';
+import { bookReadings, chainOiReadings, oiReadings, vixReadings } from '../data/flow-tape.js';
+import { recentChain } from '../data/option-chain.js';
 import type {
   JournalChannel, JournalContract, JournalEntryInput, JournalShadow, JournalTrade,
 } from './types.js';
@@ -88,32 +90,20 @@ export const journalConfig = () => ({
   slPct: num('JOURNAL_SL_PCT', 50, 1, 99) / 100,
   /**
    * THE CHECKPOINT. Once the position has been up `armAtPct`, the stop moves once to `lockPct`
-   * and never moves again. Set `JOURNAL_ARM_AT_PCT=0` to switch it off and grade at the two fixed
-   * levels exactly as before.
+   * and never moves again. 0, the default, switches it off and grades at the two fixed levels.
    *
-   * WHY IT IS ON. Graded on all 78 journalled trades, each walked bar by bar on its own contract's
-   * minute candles: +80/−50 alone nets ₹59,166, and arming a +6% stop at +24% nets ₹91,248. The
-   * gain is not protection of winners — it converts full-sized losses into small wins and pays a
-   * part of that back by clipping gains. It survives the pessimistic fill assumption too: refill
-   * every stop at the low of the bar that triggered it and it still leads by ₹20,816.
+   * WHY IT IS OFF (2026-09-19). It was switched on 2026-08-30 on 78 trades, where +24% → +6% led
+   * the flat pair by ₹20,816. That lead did not survive a larger sample. Re-graded on all 194
+   * trades from 1 Jul to 18 Sep, each on its own archived minute path, flat +80/−50 nets
+   * ₹1,70,226 and +24% → +6% nets ₹1,52,977. It converts 14 red trades into small wins, but it
+   * stops out more winners on their ordinary pullbacks than that is worth. Every arming level from
+   * +5% to +30% loses to flat on the same data, and so does every lock gated to the afternoon once
+   * the raised stop may only be placed while the price is above it.
    *
-   * WHY A SINGLE RUNG. Every trigger from +12% to +26% beats the flat rule, so the ARMING level is
-   * a plateau rather than a fitted point — but the three-rung ladder that inspired it (+15→cost,
-   * +25→+10, +50→+25) nets only ₹62,809 and turns NEGATIVE under worst-case fills, because it
-   * fires 38 times instead of 16 and every firing pays the spread again. One rung, and let
-   * winners run.
-   *
-   * WHY +6% AND NOT LESS. The lock only matters to trades that actually reach it, so raising it
-   * collects more on each without touching anything else — the same 15 trades that were exiting at
-   * +2% now exit at +6%, and exactly one (GAIL, 03-Aug) is newly cut, having dipped into the band
-   * and then run to +15.8%. Breakeven grades ₹75,360 and +2% grades ₹79,147.
-   *
-   * THE HONEST CAVEAT. Unlike the arming level, the LOCK is not a plateau: +4% to +6% all land
-   * within about ₹5k of each other and +8% falls away sharply to ₹73,047. 6 is the top of a sweep
-   * over 78 trades, so read it as fitted, not as a discovered constant. If it disappoints in live
-   * trading, step down to 4 rather than concluding the checkpoint itself is wrong.
+   * The mechanism is still here because `ExitLab` and the shadow rules grade against it. Switch it
+   * back on only on a sample larger than the one that switched it off.
    */
-  armAtPct: num('JOURNAL_ARM_AT_PCT', 24, 0, 1000) / 100,
+  armAtPct: num('JOURNAL_ARM_AT_PCT', 0, 0, 1000) / 100,
   lockPct: num('JOURNAL_LOCK_PCT', 6, -99, 1000) / 100,
   /** Minute of session to square off anything still open. 360 = 15:15. */
   squareOffMin: num('JOURNAL_SQUARE_OFF_MIN', 360, 1, SESSION_CLOSE_MIN - SESSION_OPEN_MIN),
@@ -233,6 +223,28 @@ function price(t: JournalTrade): void {
 /* ------------------------------------------------------------------------- recording --- */
 
 /**
+ * What was behind the move at the moment of the alert: futures OI over the move, the chain's OI
+ * around the money, the stock's order book and India VIX. Stored on every trade so that, once there
+ * are enough of them, "did the dead trades have OI falling, or sellers stacked, under them?" can be
+ * answered. The chart could not answer it — see `flow-tape.ts` for the study that showed that.
+ *
+ * Swallows its own failures. These are research readings, and a missing one must never cost a
+ * journal row.
+ */
+function flowReadings(r: JournalEntryInput, nowMs: number): Record<string, number | null> {
+  try {
+    return {
+      ...oiReadings(r.symbol, nowMs),
+      ...chainOiReadings(recentChain(r.symbol, nowMs), r.strike?.strike ?? null, r.strike?.type ?? null),
+      ...bookReadings(r.symbol, nowMs),
+      ...vixReadings(nowMs),
+    };
+  } catch {
+    return {};
+  }
+}
+
+/**
  * Journal a batch of alerts. Called by each channel immediately after it has resolved contracts
  * and delivered the message.
  *
@@ -279,7 +291,7 @@ export async function recordEntries(
         spreadPctAtEntry: r.strike?.spreadPct ?? null,
         amountUsed: null, grossPnl: null, charges: null, netPnl: null, netPct: null,
         shadow: [],
-        readings: r.readings ?? {},
+        readings: { ...flowReadings(r, nowMs), ...(r.readings ?? {}) },
         note: r.note ?? '',
         // A contract that could not be priced is recorded anyway — the signal happened, and a
         // journal that hides its unpriceable days overstates how tradeable the feed is.

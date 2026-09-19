@@ -253,7 +253,7 @@ describe('displacement alert — the message', () => {
   });
 
   it('gives an approximate stock level off the delta, labelled as approximate', () => {
-    const text = buildMessage(c, strike(), MARKDOWN, NOW);
+    const text = pinned(() => buildMessage(c, strike(), MARKDOWN, NOW));
     // +24% of a ₹10 premium is ₹2.40, and at delta 0.5 that is ₹4.80 of underlying: 300 -> 304.80.
     assert.match(text, /stock ≈ ₹304\.80/);
   });
@@ -320,22 +320,25 @@ describe('displacement alert — the rule as shipped', () => {
 
   // The one place the tuned checkpoint is pinned. Changing it should fail exactly this assertion,
   // and the failure should be read as "confirm the study, then update the number" rather than as
-  // a bug. Graded 2026-08-30 on all 78 journalled trades, on their own option candles:
-  // +80/-50 alone nets Rs59,166; arming a +6% stop at +24% nets Rs91,248, and Rs79,266 if every
-  // stop is refilled at the low of the bar that triggered it.
+  // a bug. Switched OFF 2026-09-19: on all 194 journalled trades (1 Jul - 18 Sep), each on its own
+  // archived minute path, plain +80/-50 nets Rs1,70,226 and arming +6% at +24% nets Rs1,52,977.
+  // The 78-trade result that switched it on (2026-08-30) did not survive the larger sample.
   // Read with the env CLEARED, so this pins what the code ships rather than what the local `.env`
   // happens to say — `.env` is gitignored and differs per machine, and a test that depends on it
   // passes or fails for reasons that have nothing to do with the commit.
-  it('arms the checkpoint at +24% and parks the stop at +6%', () => {
+  it('ships with the checkpoint off: sell all at +80% or 15:15, hard stop -50%', () => {
     const keys = ['DISPLACEMENT_ARM_AT_PCT', 'DISPLACEMENT_LOCK_PCT', 'DISPLACEMENT_TP2_PCT', 'DISPLACEMENT_SL_PCT'];
     const before = keys.map((k) => process.env[k]);
     for (const k of keys) delete process.env[k];
     try {
       const e = exits();
-      assert.equal(e.armAt, 0.24);
-      assert.equal(e.lock, 0.06);
+      assert.equal(e.armAt, 0);
       assert.equal(e.second, 0.80);
       assert.equal(e.stop, 0.50);
+      // With the checkpoint off the message must not tell anyone to move a stop.
+      const text = buildMessage(pick([input()])[0], strike(), MARKDOWN, NOW);
+      assert.doesNotMatch(text, /MOVE STOP/);
+      assert.match(text, /①.*SELL ALL at ₹18\.00/);
     } finally {
       keys.forEach((k, i) => { if (before[i] !== undefined) process.env[k] = before[i]; });
     }

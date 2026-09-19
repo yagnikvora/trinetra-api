@@ -45,6 +45,7 @@ import { marketOpen, minuteOfSession, sessionFraction, istDay } from '../session
 import { getBaseline, type SymbolBaseline } from '../data/baseline.js';
 import { quoteSnapshot, type MomentumQuote, type QuoteSnapshot } from '../data/quotes.js';
 import { stockChain, type StockChain } from '../data/option-chain.js';
+import { recordBookTape, recordFuturesTape, recordVixTape } from '../data/flow-tape.js';
 import { inBatches } from '../data/candles.js';
 import {
   flushSessionState, holdDirection, observe, observeEnrichment, sessionState, smoothScore,
@@ -608,6 +609,25 @@ export async function runScan(cfg: MomentumConfig, nowMs = Date.now()): Promise<
       vwapSideBufferAtr: conv.vwapSideBufferAtr,
       spineIntervalMin: conv.spineIntervalMin,
     });
+  }
+
+  // Futures OI, order-book totals and VIX, minute by minute, so a journalled alert can say what was
+  // behind the move it fired on (see `flow-tape.ts`). Market hours only: `currentBoard()` scans on
+  // demand at any hour, and an evening page load would otherwise stamp the closing figures onto a
+  // minute that never traded.
+  if (marketOpen(nowMs)) {
+    // Keyed by the map, not by `q.symbol`: the snapshot files a future under its UNDERLYING's
+    // name, and that is the name the journal will ask for.
+    for (const [symbol, f] of snap.futures) {
+      recordFuturesTape(
+        symbol,
+        { oi: f.openInterest, price: f.ltp, buy: f.totalBuyQty, sell: f.totalSellQty },
+        baseline?.symbols[symbol]?.prevFuturesOi,
+        nowMs,
+      );
+    }
+    for (const [symbol, q] of snap.equity) recordBookTape(symbol, q.totalBuyQty, q.totalSellQty, nowMs);
+    if (snap.vix) recordVixTape(snap.vix.ltp, snap.vix.prevClose, nowMs);
   }
 
   const breadth = computeBreadth(snap);

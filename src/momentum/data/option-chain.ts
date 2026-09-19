@@ -167,7 +167,7 @@ export async function stockChain(symbol: string, underlyingKey: string, nowMs = 
     ? rows.reduce((best, r) => (Math.abs(r.strike - spot) < Math.abs(best - spot) ? r.strike : best), rows[0].strike)
     : 0;
 
-  return {
+  const chain: StockChain = {
     symbol,
     underlyingKey,
     expiry,
@@ -176,6 +176,22 @@ export async function stockChain(symbol: string, underlyingKey: string, nowMs = 
     atmStrike,
     rows,
   };
+  recent.set(symbol, { at: nowMs, chain });
+  return chain;
+}
+
+/**
+ * The last chain fetched for a symbol, if it is fresh.
+ *
+ * Both alert channels fetch the chain to pick a strike moments before the journal records the
+ * trade, and the journal wants that same chain's OI. Reading it back from here costs nothing,
+ * where a second fetch would cost a request per alert and could describe a different minute.
+ */
+const recent = new Map<string, { at: number; chain: StockChain }>();
+
+export function recentChain(symbol: string, nowMs = Date.now(), maxAgeMs = 120_000): StockChain | null {
+  const hit = recent.get(symbol);
+  return hit && nowMs - hit.at <= maxAgeMs ? hit.chain : null;
 }
 
 /** The ATM row, or the closest one that actually has both legs quoted. */
