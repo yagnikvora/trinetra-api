@@ -21,6 +21,8 @@ import {
   dueBell, GRACE_MIN, renderBell, type BellState,
 } from '../src/alerts/session-bell.js';
 import { bestOf, fitness, parseBatch, usable, type Quote } from '../src/alerts/quotes.js';
+import { isSessionDay, isTradingDay, marketOpen } from '../src/momentum/session.js';
+import { recordEntries, setJournalRepository } from '../src/momentum/journal/journal.js';
 
 /* ------------------------------------------------------------------------ fixtures --- */
 
@@ -127,6 +129,52 @@ describe('session bell: days the market is shut', () => {
     withHolidays('2026-10-02', () => {
       assert.equal(dueBell(ist(9, 15), FRESH), 'open');
     });
+  });
+});
+
+// The scanner, the journal and every cache TTL ask `marketOpen`, not the bell. On 2026-10-02 the
+// bell stayed silent and the scanner did not: it read the holiday as an open session and
+// journalled four 09:27 trades off the previous day's frozen book.
+describe('market open: a listed holiday is a closed market', () => {
+  const gandhiJayanti = (hh: number, mm: number): number => Date.UTC(2026, 9, 2, hh, mm) - 330 * 60_000;
+
+  it('is shut all day on a holiday that falls on a weekday', () => {
+    withHolidays('2026-10-02', () => {
+      assert.equal(marketOpen(gandhiJayanti(9, 27)), false);
+      assert.equal(marketOpen(gandhiJayanti(12, 0)), false);
+      assert.equal(isTradingDay(gandhiJayanti(9, 27)), false);
+      assert.equal(isSessionDay('2026-10-02'), false);
+    });
+  });
+
+  it('is open on the same clock time when the day is not listed', () => {
+    withHolidays('', () => {
+      assert.equal(marketOpen(gandhiJayanti(9, 27)), true);
+      assert.equal(isSessionDay('2026-10-02'), true);
+    });
+  });
+
+  it('writes no journal row on a holiday, whatever the caller sends', async () => {
+    const before = process.env.MARKET_HOLIDAYS;
+    process.env.MARKET_HOLIDAYS = '2026-10-02';
+    const saved: unknown[] = [];
+    setJournalRepository({
+      existing: async () => new Set<string>(),
+      save: async (rows: unknown[]) => { saved.push(...rows); },
+      mine: async () => [],
+    } as never);
+    try {
+      await recordEntries(
+        'displacement',
+        [{ symbol: 'HINDPETRO', direction: -1, spot: 345, strike: null } as never],
+        gandhiJayanti(9, 27),
+      );
+      assert.equal(saved.length, 0);
+    } finally {
+      setJournalRepository(null);
+      if (before === undefined) delete process.env.MARKET_HOLIDAYS;
+      else process.env.MARKET_HOLIDAYS = before;
+    }
   });
 });
 

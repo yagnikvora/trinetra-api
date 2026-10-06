@@ -32,13 +32,37 @@ function sessionFraction(nowUtcMs: number): number {
   return (istMin - open) / (close - open);
 }
 
-// NSE cash session in IST: 09:15–15:30, Mon–Fri. Outside it the numbers are frozen
-// for the day, which is what lets the cache in index.ts stop re-fetching. (Trading
-// holidays aren't tracked — one just reads as "open" and re-fetches unchanged data.)
+let holidayRaw: string | null = null;
+let holidaySet = new Set<string>();
+
+/**
+ * `MARKET_HOLIDAYS`, parsed once per distinct value of the variable.
+ *
+ * Lives beside `marketOpen` because that is the function that has to consult it, and
+ * `momentum/session.ts` — which re-exports both — imports from here, not the other way round.
+ */
+export function marketHolidays(): Set<string> {
+  const raw = process.env.MARKET_HOLIDAYS ?? '';
+  if (raw !== holidayRaw) {
+    holidayRaw = raw;
+    holidaySet = new Set(raw.split(',').map((s) => s.trim()).filter(Boolean));
+  }
+  return holidaySet;
+}
+
+// NSE cash session in IST: 09:15–15:30, Mon–Fri, and not on a listed trading holiday. Outside
+// it the numbers are frozen for the day, which is what lets the cache in index.ts stop
+// re-fetching.
+//
+// THE HOLIDAY CHECK IS NOT A NICETY. Without it a holiday read as an open session, the scanner
+// ran all day against the previous close, and at minute 12 a full day's frozen volume and range
+// looked like a displacement: on 2026-10-02 (Gandhi Jayanti) four alerts went to the phone at
+// 09:27 and were journalled as trades in a market that never opened.
 export function marketOpen(nowMs: number = Date.now()): boolean {
   const ist = new Date(nowMs + 330 * 60_000); // shift so the UTC getters read IST
   const dow = ist.getUTCDay();
   if (dow === 0 || dow === 6) return false;
+  if (marketHolidays().has(ist.toISOString().slice(0, 10))) return false;
   const mins = ist.getUTCHours() * 60 + ist.getUTCMinutes();
   return mins >= 9 * 60 + 15 && mins <= 15 * 60 + 30;
 }

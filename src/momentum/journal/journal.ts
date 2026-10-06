@@ -43,7 +43,8 @@
 // exit as a 15:15 square-off.
 
 import {
-  istDay, istMinutes, sessionAt, SESSION_CLOSE_MIN, SESSION_MINUTES, SESSION_OPEN_MIN,
+  isSessionDay, isTradingDay, istDay, istMinutes, sessionAt,
+  SESSION_CLOSE_MIN, SESSION_MINUTES, SESSION_OPEN_MIN,
 } from '../session.js';
 import { feedTick, subscribeKeys, takeSellRange } from '../../feed/client.js';
 import { sessionCandles, type UpstoxCandle } from '../../upstox.js';
@@ -258,6 +259,11 @@ export async function recordEntries(
 ): Promise<void> {
   const cfg = journalConfig();
   if (!cfg.enabled || !rows.length) return;
+  // NOT ON A DAY THE EXCHANGE NEVER OPENED. `marketOpen` already keeps the scanner off a holiday,
+  // so nothing should arrive here on one — but this is the last line before a row is written to
+  // the one record that cannot be rebuilt, and a "trade" on a closed market has no fill, no path
+  // and no exit. The four rows of 2026-10-02 were priced off the previous day's frozen book.
+  if (!isTradingDay(nowMs)) return;
   try {
     const repo = journalRepository();
     const day = istDay(nowMs);
@@ -1016,13 +1022,12 @@ export async function journalRange(from: string, to: string, channel?: string | 
   };
 }
 
-/** Calendar weekdays in the range. Holidays are not netted out; it is a rough "quiet" count. */
+/** Trading days in the range: weekdays, less the holidays listed in `MARKET_HOLIDAYS`. */
 function countSessionDays(from: string, to: string): number {
   let n = 0;
   const a = Date.parse(`${from}T00:00:00Z`), b = Date.parse(`${to}T00:00:00Z`);
   for (let t = a; t <= b && n < 1000; t += 86_400_000) {
-    const dow = new Date(t).getUTCDay();
-    if (dow !== 0 && dow !== 6) n++;
+    if (isSessionDay(new Date(t).toISOString().slice(0, 10))) n++;
   }
   return n;
 }

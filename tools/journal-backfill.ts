@@ -602,6 +602,19 @@ async function main(): Promise<void> {
 
   console.log(`\n\n  ${rows.length} priced · ${noContract} without a listed strike · ${noCandles} without candles\n`);
 
+  // `--list` prints each trade, for reading a single missed session without writing it.
+  if (argv.includes('--list')) {
+    for (const t of [...rows].sort((a, b) => a.entry.at - b.entry.at))
+      console.log(
+        `  ${t.day}  ${clock(t.entry.minute)}  ${t.symbol.padEnd(12)} ${String(t.contract?.label).padEnd(10)} ` +
+        `in ${String(t.entry.premium).padStart(7)}  out ${String(t.exit?.premium).padStart(7)} ` +
+        `${clock(t.exit?.minute ?? 0)} ${String(t.exit?.reason).padEnd(10)} ` +
+        `used ${String(t.amountUsed).padStart(8)}  net ${String(t.netPnl).padStart(9)}  ` +
+        `(${(100 * (t.netPct ?? 0)).toFixed(1)}%)  peak ${(100 * (t.mfePct ?? 0)).toFixed(0)}% low ${(100 * (t.maePct ?? 0)).toFixed(0)}%`,
+      );
+    console.log('');
+  }
+
   const done = rows.filter((t) => t.netPnl !== null);
   const wins = done.filter((t) => (t.netPnl ?? 0) > 0).length;
   const used = done.reduce((a, t) => a + (t.amountUsed ?? 0), 0);

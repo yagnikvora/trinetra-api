@@ -26,6 +26,7 @@
 // local copy as though it were the shared record is the one behaviour worth going out of the way
 // to prevent.
 
+import { isSessionDay } from '../session.js';
 import { store as diskStore, type KeyValueStore } from '../store.js';
 import type { JournalChannel, JournalTrade } from './types.js';
 
@@ -384,6 +385,10 @@ export class MirrorJournalRepository implements JournalRepository {
     }
     const remoteById = new Map(theirs.map((t) => [t.id, t]));
     const push = mine.filter((t) => {
+      // A row dated on a day the exchange was shut is not history to backfill. The holiday rows of
+      // 2026-10-02 were deleted from the database, and without this the recording machine's own
+      // copy would put them straight back on its next boot.
+      if (!isSessionDay(t.day)) return false;
       const r = remoteById.get(t.id);
       return !r || (t.updatedAt ?? 0) > (r.updatedAt ?? 0);
     });
