@@ -122,4 +122,8 @@ export const STORE_KEYS = {
   dailyBars: 'daily_bars',
   /** NSE's securities-in-ban list for the session, fetched once a day. See `data/fo-ban.ts`. */
   foBan: 'fo_ban',
+  /** NSE's results board meetings for the session, fetched once a day. See `data/results-calendar.ts`. */
+  resultsCalendar: 'results_calendar',
+  /** The day's news read per stock, swept before the open. See `data/news-sentiment.ts`. */
+  newsSentiment: 'news_sentiment',
 } as const;

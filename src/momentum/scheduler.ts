@@ -39,6 +39,7 @@ import {
   backfillExcursions, journalBoot, journalSettleDue, journalTick,
 } from './journal/journal.js';
 import { flushCandidateLog } from './alerts/displacement.js';
+import { newsSweepDue, sweepNews } from './data/news-sentiment.js';
 import { archiveNearMisses } from './journal/near-miss.js';
 import { sessionBellTick } from '../alerts/session-bell.js';
 import { checkTelegram } from '../alerts/telegram.js';
@@ -295,6 +296,13 @@ export async function startScheduler(): Promise<void> {
   // the settle because it is the same kind of job — idempotent, catches up after a restart, and of
   // no consequence if a tick is missed.
   every(2 * 60_000, () => void flushCandidateLog().catch(() => {}));
+
+  // Read the overnight news on every stock before the open, and again each half hour until the
+  // trend-day window has passed. In the background and never awaited: the free model tier can take
+  // over a minute to answer, which is why the alerts look the result up instead of asking for it.
+  const newsTick = () => void newsSweepDue().then((due) => (due ? sweepNews() : 0)).catch(() => {});
+  every(5 * 60_000, newsTick);
+  newsTick();
 
   // Once an hour after the window: price the qualifiers the cap turned away, while their contracts
   // still exist. This is the only job here with a genuine deadline — an option series expires in

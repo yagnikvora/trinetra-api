@@ -46,6 +46,8 @@ import { selectStrike } from '../services/strike.service.js';
 import { recordEntries } from '../journal/journal.js';
 import { displacementTaken } from './displacement.js';
 import { foBan } from '../data/fo-ban.js';
+import { RESULTS_NOTE, resultsLine, resultsTags, type ResultsTag } from '../data/results-calendar.js';
+import { newsLine, newsReadings, newsReads, type NewsRead } from '../data/news-sentiment.js';
 import { latestTrendPlans, type TrendDayPlan } from '../engine/momentum.engine.js';
 import type {
   ConvictionSummary, MomentumConfig, MomentumRow, SignalPlan, StrikeChoice,
@@ -174,6 +176,15 @@ export interface TrendDayAlert {
   minutesSinceExtreme: number | null;
   atrUsed: number | null;
   lotSize: number | null;
+  /**
+   * Set when the stock is trading on its quarterly results. See `data/results-calendar.ts`.
+   *
+   * Null is "not a results day"; undefined is "the calendar could not be read", and the journal
+   * records the two differently.
+   */
+  results?: ResultsTag | null;
+  /** What the pre-open sweep read in the stock's overnight news. Absent when it is not known. */
+  news?: NewsRead | null;
 }
 
 /**
@@ -373,6 +384,16 @@ function block(a: TrendDayAlert, m: Markup): string[] {
   // conviction there would have silently removed it from exactly the messages that carry one
   // confirmation — which is most of them outside the 10:30 stampede.
   out.push(`    🎯 ${m.bold(`CONVICTION ${c.score.toFixed(0)}`)}`);
+
+  // Under conviction rather than on the first line, for the reason given above: a single-stock
+  // message drops its block's first line.
+  if (a.results) {
+    out.push(`    📊 ${m.bold(m.escape(resultsLine(a.results)))}`);
+    out.push(`       ${m.italic(m.escape(RESULTS_NOTE))}`);
+  }
+  // Read by a language model from the headlines, and untested as a signal — hence italic.
+  const newsText = newsLine(a.news, a.direction);
+  if (newsText) out.push(`    📰 ${m.italic(m.escape(newsText))}`);
 
   // The shape behind the verdict. Without it "conviction 73" is a number the reader has to trust;
   // with it, they can disagree — which is the whole reason the conviction layer reports its
@@ -866,7 +887,15 @@ export async function onScan(
     await store.write(STORE_KEYS.trendAlerts, state);
     announcedToday = state.announced.length;
 
-    await priceContracts(usable, cfg, nowMs);
+    // Alongside the chains, so the tag costs the alert no time. Null when NSE could not be read.
+    const [, results, news] = await Promise.all([
+      priceContracts(usable, cfg, nowMs),
+      resultsTags(usable.map((a) => a.symbol), nowMs),
+      // A lookup of what the pre-open sweep read. It never asks the model from here.
+      newsReads(usable.map((a) => a.symbol), nowMs),
+    ]);
+    if (results) for (const a of usable) a.results = results.get(a.symbol) ?? null;
+    for (const a of usable) a.news = news.get(a.symbol) ?? null;
     await deliver(usable, nowMs);
     await recordEntries('trend-day', usable.map((a) => ({
       symbol: a.symbol,
@@ -880,6 +909,9 @@ export async function onScan(
         changePct: a.changePct,
         atrUsed: a.atrUsed,
         minutesSinceExtreme: a.minutesSinceExtreme,
+        resultsDay: a.results === undefined ? null : Number(a.results !== null),
+        resultsOut: a.results === undefined ? null : Number(a.results?.when === 'previous'),
+        ...newsReadings(a.news ?? null),
       },
     })), nowMs);
     return usable;

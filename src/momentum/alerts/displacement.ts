@@ -57,6 +57,10 @@
 import { istDay, minuteOfSession } from '../session.js';
 import { store, STORE_KEYS } from '../store.js';
 import { foBan, foBanStatus } from '../data/fo-ban.js';
+import {
+  RESULTS_NOTE, resultsCalendarStatus, resultsLine, resultsTags, type ResultsTag,
+} from '../data/results-calendar.js';
+import { newsLine, newsReadings, newsReads, newsSentimentStatus, type NewsRead } from '../data/news-sentiment.js';
 import { stockChain } from '../data/option-chain.js';
 import { universe } from '../data/universe.js';
 import { selectStrike } from '../services/strike.service.js';
@@ -352,14 +356,24 @@ export function buildMessage(
   strike: StrikeChoice | null,
   m: Markup,
   nowMs: number,
+  /** Set when the stock is trading on its quarterly results. See `data/results-calendar.ts`. */
+  results: ResultsTag | null = null,
+  /** What the pre-open sweep read in the stock's overnight news. See `data/news-sentiment.ts`. */
+  news: NewsRead | null = null,
 ): string {
   const e = exits();
+  const newsText = newsLine(news, c.direction);
   const arrow = c.direction === 1 ? '🟢' : '🔴';
   const word = c.direction === 1 ? 'BULLISH' : 'BEARISH';
 
   const out: string[] = [
     `🚀 ${m.bold(`${m.escape(c.symbol)} — ${word} FIRST-HOUR DISPLACEMENT`)}`,
     m.italic(`${istClock(nowMs)} IST · minute ${c.minute} of the session`),
+    // Above the readings, not under them: it is the one line here that says something the chart
+    // does not, and it is what the reader sizes on.
+    ...(results ? [`📊 ${m.bold(m.escape(resultsLine(results)))}`, `    ${m.italic(m.escape(RESULTS_NOTE))}`] : []),
+    // Read by a language model from the headlines, and untested as a signal — hence italic.
+    ...(newsText ? [`📰 ${m.italic(m.escape(newsText))}`] : []),
     '',
     `${arrow} ${m.bold(px(c.entry))}  ${pct(c.changePct)}  ·  ${m.bold(`RVOL ${c.rvol.toFixed(1)}×`)}`,
     `    ${m.bold(c.rangeAtr.toFixed(2))} ATR of range already made · ${m.bold(c.moveAtr.toFixed(2))} ATR from the open ${px(c.open)} · ${c.offExtremeAtr.toFixed(2)} ATR off the ${c.direction === 1 ? 'high' : 'low'} ${px(c.direction === 1 ? c.dayHigh : c.dayLow)}`,
@@ -491,7 +505,13 @@ export async function onScan(
     state.announced = [...state.announced, ...found.map((p) => p.symbol)];
     await store.write(STORE_KEYS.displacementAlerts, state);
 
-    const strikes = await priceContracts(found, cfg, nowMs);
+    // Alongside the chains, so the tag costs the alert no time. Null when NSE could not be read.
+    const [strikes, results, news] = await Promise.all([
+      priceContracts(found, cfg, nowMs),
+      resultsTags(found.map((c) => c.symbol), nowMs),
+      // A lookup of what the pre-open sweep read. It never asks the model from here.
+      newsReads(found.map((c) => c.symbol), nowMs),
+    ]);
 
     // AND NOT A CONTRACT NOBODY IS QUOTING. The stock can clear every gate above and the only
     // contract on it still be untradable, and until 2026-10-13 that was a warning line on a
@@ -511,7 +531,7 @@ export async function onScan(
     announcedToday = state.announced.length;
     if (!picked.length) return [];
 
-    await deliver(picked, strikes, nowMs);
+    await deliver(picked, strikes, results, news, nowMs);
     // After the send, never before it. The journal is bookkeeping and must not be able to delay
     // or fail the one thing on this path that matters.
     await recordEntries('displacement', picked.map((c) => ({
@@ -524,6 +544,10 @@ export async function onScan(
       readings: {
         rvol: c.rvol, rangeAtr: c.rangeAtr, moveAtr: c.moveAtr,
         offExtremeAtr: c.offExtremeAtr, atr: c.atr, turnoverCr: c.turnoverCr, changePct: c.changePct,
+        // Null, not 0, on a morning the calendar could not be read.
+        resultsDay: results ? Number(results.has(c.symbol)) : null,
+        resultsOut: results ? Number(results.get(c.symbol)?.when === 'previous') : null,
+        ...newsReadings(news.get(c.symbol) ?? null),
       },
     })), nowMs);
     markTaken(picked.map((c) => ({ symbol: c.symbol, minute: c.minute })), nowMs);
@@ -600,6 +624,8 @@ async function priceContracts(
 async function deliver(
   picked: DisplacementCandidate[],
   strikes: Map<string, StrikeChoice | null>,
+  tags: Map<string, ResultsTag> | null,
+  news: Map<string, NewsRead>,
   nowMs: number,
 ): Promise<void> {
   if (!telegramConfigured() && !discordConfigured()) {
@@ -610,9 +636,11 @@ async function deliver(
   const results: boolean[] = [];
   for (const c of picked) {
     const s = strikes.get(c.symbol) ?? null;
+    const tag = tags?.get(c.symbol) ?? null;
     const jobs: Promise<boolean>[] = [];
-    if (telegramConfigured()) jobs.push(sendTelegram(buildMessage(c, s, HTML, nowMs)));
-    if (discordConfigured()) jobs.push(sendDiscord(buildMessage(c, s, MARKDOWN, nowMs), c.direction));
+    const read = news.get(c.symbol) ?? null;
+    if (telegramConfigured()) jobs.push(sendTelegram(buildMessage(c, s, HTML, nowMs, tag, read)));
+    if (discordConfigured()) jobs.push(sendDiscord(buildMessage(c, s, MARKDOWN, nowMs, tag, read), c.direction));
     results.push(...(await Promise.all(jobs)));
   }
 
@@ -635,6 +663,10 @@ export const displacementAlertStatus = () => ({
   allowCarriedBaseline: allowCarried(),
   /** Today's F&O ban list as this process holds it. An error here means the gate is not in force. */
   foBan: foBanStatus(),
+  /** Today's results calendar as this process holds it. An error here means alerts go out untagged. */
+  resultsCalendar: resultsCalendarStatus(),
+  /** The news sweep. `unlabelled` above zero means the model has not answered for those stocks. */
+  newsSentiment: newsSentimentStatus(),
   lastRefused,
   lastSentAt,
   lastError,
