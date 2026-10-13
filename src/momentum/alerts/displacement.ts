@@ -56,6 +56,7 @@
 
 import { istDay, minuteOfSession } from '../session.js';
 import { store, STORE_KEYS } from '../store.js';
+import { foBan, foBanStatus } from '../data/fo-ban.js';
 import { stockChain } from '../data/option-chain.js';
 import { universe } from '../data/universe.js';
 import { selectStrike } from '../services/strike.service.js';
@@ -101,7 +102,23 @@ export const rule = () => ({
   /** 10:00. Past this the base rate of a 1 ATR move falls away — 8.6% against 14.2% at 09:25. */
   toMinute: num('DISPLACEMENT_TO_MIN', 45, 1, 375),
   maxPerDay: num('DISPLACEMENT_MAX_PER_DAY', 4, 1, 50),
+  /**
+   * The widest bid-ask, as a percentage of the mid, a contract may be alerted at. The edge dies at
+   * 6% spreads, and the journal buys the ask and marks the bid — so a book wider than the stop is
+   * a loss booked on the first tick. BANDHANBNK's 165 CE was 115.8% wide on 2026-10-13.
+   */
+  maxSpreadPct: num('DISPLACEMENT_MAX_SPREAD_PCT', 6, 0.1, 1000),
 });
+
+/**
+ * Whether the picked contract's book is too wide to alert on.
+ *
+ * A contract with no two-sided book has no spread to read and is NOT refused here: that is the
+ * ordinary state of a thin strike at 09:27, and the ban list is what catches the case where it is
+ * one-sided because nobody is allowed to quote it.
+ */
+export const tooWide = (s: StrikeChoice | null | undefined, maxSpreadPct: number): boolean =>
+  !!s && s.spreadPct !== null && s.spreadPct > maxSpreadPct;
 
 /**
  * Whether to fire on a symbol whose baseline was carried forward from an earlier day.
@@ -275,13 +292,22 @@ interface AlertState {
   day: string;
   /** Symbols announced today, in either direction. One alert per stock per day. */
   announced: string[];
+  /**
+   * Symbols that qualified and were turned away because their contract was quoted too wide.
+   *
+   * Kept apart from `announced` so a refusal does not spend one of the day's four alerts, and kept
+   * at all so the same symbol is not re-priced — one chain request — on every scan until 10:00.
+   */
+  refused: string[];
 }
 
-const EMPTY: AlertState = { day: '', announced: [] };
+const EMPTY: AlertState = { day: '', announced: [], refused: [] };
 
 async function load(day: string): Promise<AlertState> {
   const saved = await store.read<AlertState>(STORE_KEYS.displacementAlerts);
-  return saved && saved.day === day ? { day, announced: saved.announced ?? [] } : { ...EMPTY, day };
+  return saved && saved.day === day
+    ? { day, announced: saved.announced ?? [], refused: saved.refused ?? [] }
+    : { ...EMPTY, day };
 }
 
 /**
@@ -416,6 +442,8 @@ let lastScanMinute: number | null = null;
  * and the channel being quiet is a data problem rather than a quiet tape.
  */
 let skippedStaleBaseline = 0;
+/** The last contracts turned away for their spread, in words. See `tooWide`. */
+let lastRefused: string | null = null;
 
 /**
  * Called once per scan with the live readings. Never throws — an alert channel must not be able
@@ -449,18 +477,40 @@ export async function onScan(
 
     if (state.announced.length >= r.maxPerDay) return [];
 
-    const announced = new Set(state.announced);
-    const picked = selectDisplacement(inputs, announced, minute, r)
+    // NOT A STOCK IN THE F&O BAN. Its cash price moves like any other and its option has no book —
+    // see `data/fo-ban.ts`. Excluded the same way an announced symbol is, so the selection stays
+    // pure and a banned name cannot take one of the day's slots.
+    const banned = await foBan(nowMs);
+    const excluded = new Set([...state.announced, ...state.refused, ...banned]);
+    const found = selectDisplacement(inputs, excluded, minute, r)
       .slice(0, r.maxPerDay - state.announced.length);
-    if (!picked.length) return [];
+    if (!found.length) return [];
 
     // Recorded BEFORE the send, exactly as the two channels beside it do: a webhook slower than
     // the fifteen-second scan would otherwise be handed the same symbols on the next tick.
-    state.announced = [...state.announced, ...picked.map((p) => p.symbol)];
+    state.announced = [...state.announced, ...found.map((p) => p.symbol)];
     await store.write(STORE_KEYS.displacementAlerts, state);
-    announcedToday = state.announced.length;
 
-    const strikes = await priceContracts(picked, cfg, nowMs);
+    const strikes = await priceContracts(found, cfg, nowMs);
+
+    // AND NOT A CONTRACT NOBODY IS QUOTING. The stock can clear every gate above and the only
+    // contract on it still be untradable, and until 2026-10-13 that was a warning line on a
+    // message that went out anyway. It is the backstop for the morning the ban list could not be
+    // fetched, and for a wide book that has nothing to do with a ban.
+    const wide = found.filter((c) => tooWide(strikes.get(c.symbol), r.maxSpreadPct));
+    const picked = found.filter((c) => !wide.includes(c));
+    if (wide.length) {
+      const gone = new Set(wide.map((c) => c.symbol));
+      state.announced = state.announced.filter((s) => !gone.has(s));
+      state.refused = [...state.refused, ...gone];
+      await store.write(STORE_KEYS.displacementAlerts, state);
+      lastRefused = wide
+        .map((c) => `${c.symbol} ${strikes.get(c.symbol)!.label} quoted ${strikes.get(c.symbol)!.spreadPct!.toFixed(1)}% wide`)
+        .join(', ');
+    }
+    announcedToday = state.announced.length;
+    if (!picked.length) return [];
+
     await deliver(picked, strikes, nowMs);
     // After the send, never before it. The journal is bookkeeping and must not be able to delay
     // or fail the one thing on this path that matters.
@@ -583,6 +633,9 @@ export const displacementAlertStatus = () => ({
   /** How much of the universe the last in-window scan could not trust. See the field's own note. */
   skippedStaleBaseline,
   allowCarriedBaseline: allowCarried(),
+  /** Today's F&O ban list as this process holds it. An error here means the gate is not in force. */
+  foBan: foBanStatus(),
+  lastRefused,
   lastSentAt,
   lastError,
 });
@@ -594,5 +647,6 @@ export const resetDisplacementAlerts = async (): Promise<void> => {
   announcedToday = 0;
   lastScanMinute = null;
   skippedStaleBaseline = 0;
+  lastRefused = null;
   await store.write(STORE_KEYS.displacementAlerts, { ...EMPTY });
 };

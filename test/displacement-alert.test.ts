@@ -17,7 +17,7 @@ import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 
 import {
-  buildMessage, exits, rule, selectDisplacement,
+  buildMessage, exits, rule, selectDisplacement, tooWide,
   type DisplacementCandidate, type DisplacementInput,
 } from '../src/momentum/alerts/displacement.js';
 import { HTML, MARKDOWN } from '../src/alerts/markup.js';
@@ -342,5 +342,27 @@ describe('displacement alert — the rule as shipped', () => {
     } finally {
       keys.forEach((k, i) => { if (before[i] !== undefined) process.env[k] = before[i]; });
     }
+  });
+});
+
+/* ------------------------------------------------------------------------ the book --- */
+
+describe('displacement alert — a contract nobody is quoting', () => {
+  it('ships a 6% ceiling, the spread the edge dies at', () => {
+    assert.equal(R.maxSpreadPct, 6);
+  });
+
+  it('lets an ordinary book through', () => {
+    assert.equal(tooWide(strike({ spreadPct: 2.1 }), R.maxSpreadPct), false);
+    assert.equal(tooWide(strike({ spreadPct: 6 }), R.maxSpreadPct), false);
+  });
+
+  it('refuses the 2026-10-13 BANDHANBNK 165 CE — 4.00 bid, 14.99 ask, in the F&O ban', () => {
+    assert.equal(tooWide(strike({ bid: 4, ask: 14.99, entryCost: 14.99, spreadPct: 115.75 }), R.maxSpreadPct), true);
+  });
+
+  it('does not refuse a one-sided book or a missing contract — there is no spread to read', () => {
+    assert.equal(tooWide(strike({ bid: 0, spreadPct: null }), R.maxSpreadPct), false);
+    assert.equal(tooWide(null, R.maxSpreadPct), false);
   });
 });

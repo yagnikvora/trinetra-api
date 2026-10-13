@@ -45,6 +45,7 @@ import { universe } from '../data/universe.js';
 import { selectStrike } from '../services/strike.service.js';
 import { recordEntries } from '../journal/journal.js';
 import { displacementTaken } from './displacement.js';
+import { foBan } from '../data/fo-ban.js';
 import { latestTrendPlans, type TrendDayPlan } from '../engine/momentum.engine.js';
 import type {
   ConvictionSummary, MomentumConfig, MomentumRow, SignalPlan, StrikeChoice,
@@ -802,9 +803,10 @@ export async function onScan(
     // Whatever displacement has already bought this morning is not available to be bought again.
     // Read every scan rather than cached: displacement's window overlaps the early part of this
     // one, so the set can still grow between two ticks of this channel.
-    const fresh = newlyConfirmed(
-      rows, announced, nowMs, minConviction(), await displacementTaken(day),
-    );
+    //
+    // Nor is a stock in the F&O ban, whose option has no book to buy — see `data/fo-ban.ts`.
+    const blocked = new Set([...(await displacementTaken(day)), ...(await foBan(nowMs))]);
+    const fresh = newlyConfirmed(rows, announced, nowMs, minConviction(), blocked);
     if (!fresh.length) return [];
 
     const alerts: TrendDayAlert[] = fresh

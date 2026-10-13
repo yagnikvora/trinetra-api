@@ -120,4 +120,6 @@ export const STORE_KEYS = {
    * symbol on every build. See `data/daily-cache.ts` for what it does and does not save.
    */
   dailyBars: 'daily_bars',
+  /** NSE's securities-in-ban list for the session, fetched once a day. See `data/fo-ban.ts`. */
+  foBan: 'fo_ban',
 } as const;
