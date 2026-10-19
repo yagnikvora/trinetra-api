@@ -23,10 +23,20 @@
 //
 // IT MUST NEVER BREAK AN ALERT. Everything here is called after delivery, wrapped, and swallows its
 // own errors. A log that can stop the phone ringing is worse than no log.
+//
+// THE READINGS (added 2026-10-19). Each candidate also carries the non-chart readings a trade row
+// carries — futures OI, the order book, VIX, the results tag and the news read — taken when it
+// first came into contention and taken again the first time it reached the RVOL floor. Ten trades a
+// week is too few to test those readings on; the candidates are three to five times as many, and
+// their outcome can be rebuilt later from equity candles, which stay fetchable. The readings cannot:
+// the flow tape lives in memory for thirty minutes and the news read is overwritten each morning.
 
 import { istDay } from '../session.js';
 import { store, STORE_KEYS } from '../store.js';
 import { databaseUrl, getPool, saveCandidates, type CandidateRow } from '../journal/postgres.js';
+import { bookReadings, oiReadings, vixReadings } from '../data/flow-tape.js';
+import { resultsTags } from '../data/results-calendar.js';
+import { newsReadings, newsReads } from '../data/news-sentiment.js';
 import type { DisplacementInput } from './displacement.js';
 
 /**
@@ -41,11 +51,22 @@ const NEAR = 0.7;
 /** `[minute, rvol, rangeAtr, moveAtr, offExtremeAtr, turnoverCr, ltp, direction]` */
 export type CandidateTick = [number, number, number, number, number, number, number, 1 | -1];
 
+/** The readings for one candidate, and the moment they describe. */
+interface Snapshot {
+  minute: number;
+  /** True once taken at the minute the symbol first reached the RVOL floor. */
+  atFloor: boolean;
+  values: Record<string, number | null>;
+}
+
 interface DayLog {
   day: string;
   /** symbol -> the minutes it was in contention. */
   bySymbol: Map<string, CandidateTick[]>;
   taken: Map<string, number>;
+  readings: Map<string, Snapshot>;
+  /** Symbols whose results and news lookups are still to be added to their snapshot. */
+  toAnnotate: Map<string, number>;
   flushed: boolean;
 }
 
@@ -54,7 +75,9 @@ let current: DayLog | null = null;
 const round = (n: number, dp = 3): number => +n.toFixed(dp);
 
 function forDay(day: string): DayLog {
-  if (!current || current.day !== day) current = { day, bySymbol: new Map(), taken: new Map(), flushed: false };
+  if (!current || current.day !== day) {
+    current = { day, bySymbol: new Map(), taken: new Map(), readings: new Map(), toAnnotate: new Map(), flushed: false };
+  }
   return current;
 }
 
@@ -98,8 +121,58 @@ export function observeCandidates(
       ];
       const arr = log.bySymbol.get(i.symbol);
       if (arr) arr.push(tick); else log.bySymbol.set(i.symbol, [tick]);
+
+      // Once on arrival, once more on first reaching the floor, and never again: a reading taken
+      // later than the moment a signal would have fired is a reading the alert could not have had.
+      const snap = log.readings.get(i.symbol);
+      const atFloor = rvol >= rule.minRvol;
+      if (!snap || (atFloor && !snap.atFloor)) {
+        log.readings.set(i.symbol, { minute, atFloor, values: flowSnapshot(i.symbol, nowMs) });
+        log.toAnnotate.set(i.symbol, nowMs);
+      }
     }
   } catch { /* a log must not be able to fail a scan */ }
+}
+
+function flowSnapshot(symbol: string, nowMs: number): Record<string, number | null> {
+  try {
+    return { ...oiReadings(symbol, nowMs), ...bookReadings(symbol, nowMs), ...vixReadings(nowMs) };
+  } catch {
+    return {};
+  }
+}
+
+let annotating: Promise<void> | null = null;
+
+/**
+ * Add the results tag and the news read to the snapshots taken since the last call.
+ *
+ * Separate from `observeCandidates`, which must stay synchronous and free of I/O, and called by the
+ * channel without awaiting it: the first results lookup of the day can wait on NSE for seconds, and
+ * that wait must never sit between a scan and its alert. Both lookups are of caches the morning has
+ * already filled, so this is ordinarily instant.
+ */
+export function annotateCandidates(nowMs = Date.now()): Promise<void> {
+  if (annotating || !current?.toAnnotate.size) return annotating ?? Promise.resolve();
+  const log = current;
+  const batch = [...log.toAnnotate.keys()];
+  log.toAnnotate.clear();
+  annotating = (async () => {
+    try {
+      const [results, news] = await Promise.all([resultsTags(batch, nowMs), newsReads(batch, nowMs)]);
+      for (const s of batch) {
+        const snap = log.readings.get(s);
+        if (!snap) continue;
+        Object.assign(snap.values, {
+          // Null, not 0, when the calendar could not be read — as on the journal rows.
+          resultsDay: results ? Number(results.has(s)) : null,
+          resultsOut: results ? Number(results.get(s)?.when === 'previous') : null,
+          ...newsReadings(news.get(s) ?? null),
+        });
+      }
+    } catch { /* as above */ }
+  })().finally(() => { annotating = null; });
+  return annotating;
 }
 
 /** Note which symbols the channel actually announced, and when. */
@@ -133,6 +206,10 @@ export async function flushCandidates(nowMs: number, force = false): Promise<num
       lastMinute: ticks[ticks.length - 1][0],
       peakRvol: Math.max(...ticks.map((t) => t[1])),
       ticks,
+      readings: (() => {
+        const snap = log.readings.get(symbol);
+        return snap ? { ...snap.values, readingsMinute: snap.minute, readingsAtFloor: Number(snap.atFloor) } : null;
+      })(),
     }));
 
     // Local disk first, same ordering and for the same reason as everything else here.
@@ -158,6 +235,9 @@ export function resetCandidates(): void {
  * Test seam. Overloaded so a test can ask for one symbol's ticks or for the whole symbol list,
  * without `candidateState` having to expose the log itself to the rest of the app.
  */
+/** Test seam: the readings snapshot for one candidate. */
+export const __readingsForTest = (symbol: string): Snapshot | null => current?.readings.get(symbol) ?? null;
+
 export function __ticksForTest(): string[];
 export function __ticksForTest(symbol: string): CandidateTick[];
 export function __ticksForTest(symbol?: string): string[] | CandidateTick[] {

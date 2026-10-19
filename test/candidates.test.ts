@@ -12,7 +12,7 @@ import { strict as assert } from 'node:assert';
 import { beforeEach, describe, it } from 'node:test';
 
 import {
-  candidateState, markTaken, observeCandidates, resetCandidates,
+  candidateState, markTaken, observeCandidates, resetCandidates, __readingsForTest,
 } from '../src/momentum/alerts/candidates.js';
 import { selectDisplacement, type DisplacementInput } from '../src/momentum/alerts/displacement.js';
 
@@ -113,3 +113,29 @@ describe('candidate log', () => {
 import { __ticksForTest } from '../src/momentum/alerts/candidates.js';
 const logged = (symbol: string) => __ticksForTest(symbol);
 const loggedSymbols = () => __ticksForTest();
+
+describe('candidate log — the readings', () => {
+  beforeEach(() => resetCandidates());
+
+  it('takes them on arrival, once more on first reaching the floor, and never after', () => {
+    observeCandidates([input({ symbol: 'LATE', rvol: 4 })], 13, RULE, NOW);      // in contention, below 5
+    assert.deepEqual(
+      [__readingsForTest('LATE')?.minute, __readingsForTest('LATE')?.atFloor], [13, false],
+    );
+    observeCandidates([input({ symbol: 'LATE', rvol: 4.5 })], 14, RULE, NOW);    // still below: kept as is
+    assert.equal(__readingsForTest('LATE')?.minute, 13);
+    observeCandidates([input({ symbol: 'LATE', rvol: 6 })], 15, RULE, NOW);      // reaches the floor
+    assert.deepEqual(
+      [__readingsForTest('LATE')?.minute, __readingsForTest('LATE')?.atFloor], [15, true],
+    );
+    observeCandidates([input({ symbol: 'LATE', rvol: 9 })], 16, RULE, NOW);      // later: not retaken
+    assert.equal(__readingsForTest('LATE')?.minute, 15);
+  });
+
+  it('carries the flow readings even when the tape has nothing for the symbol', () => {
+    observeCandidates([input({ symbol: 'QUIET' })], 20, RULE, NOW);
+    const values = __readingsForTest('QUIET')?.values ?? {};
+    assert.ok('futOiOpenPct' in values && 'eqBuyPct' in values && 'vix' in values);
+    assert.equal(values.futOiOpenPct, null);
+  });
+});

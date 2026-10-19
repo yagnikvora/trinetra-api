@@ -67,7 +67,7 @@ import { selectStrike } from '../services/strike.service.js';
 import type { MomentumConfig, StrikeChoice } from '../types.js';
 import type { MomentumQuote } from '../data/quotes.js';
 import { recordEntries } from '../journal/journal.js';
-import { flushCandidates, markTaken, observeCandidates } from './candidates.js';
+import { annotateCandidates, flushCandidates, markTaken, observeCandidates } from './candidates.js';
 import { HTML, istClock, MARKDOWN, type Markup } from '../../alerts/markup.js';
 import { discordConfigured, sendDiscord } from '../../alerts/discord.js';
 import { sendTelegram, telegramConfigured } from '../../alerts/telegram.js';
@@ -488,6 +488,9 @@ export async function onScan(
     // Logged BEFORE the cap check, on purpose: the candidates a full cap turns away are exactly
     // the ones a capacity study needs, and returning early here is what threw them away before.
     observeCandidates(inputs, minute, r, nowMs);
+    // Not awaited: see `annotateCandidates`. It only ever reads caches, but it must not be able to
+    // delay a scan that is about to alert.
+    void annotateCandidates(nowMs);
 
     if (state.announced.length >= r.maxPerDay) return [];
 

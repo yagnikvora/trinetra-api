@@ -392,7 +392,16 @@ export interface CandidateRow {
   lastMinute: number;
   peakRvol: number;
   ticks: Array<[number, number, number, number, number, number, number, 1 | -1]>;
+  /** OI, book, VIX, results and news readings — see `alerts/candidates.ts`. Null on older rows. */
+  readings?: Record<string, number | null> | null;
 }
+
+/**
+ * The `readings` column, added to a table that already exists on every machine. Run once per
+ * process before the first save, because `saveCandidates` is called with a bare pool that has not
+ * necessarily been through `SCHEMA`.
+ */
+let candidateReadingsColumn: Promise<unknown> | null = null;
 
 /**
  * Save the day's candidates.
@@ -403,19 +412,22 @@ export interface CandidateRow {
  */
 export async function saveCandidates(db: Queryable, rows: CandidateRow[]): Promise<number> {
   if (!rows.length) return 0;
+  candidateReadingsColumn ??= run(db, 'ALTER TABLE momentum_candidate ADD COLUMN IF NOT EXISTS readings JSONB')
+    .catch((e) => { candidateReadingsColumn = null; throw e; });
+  await candidateReadingsColumn;
   let n = 0;
   for (const r of rows) {
     const { rowCount } = await run(
       db,
       `INSERT INTO momentum_candidate
-         (day, channel, symbol, taken, taken_minute, first_minute, last_minute, peak_rvol, ticks)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)
+         (day, channel, symbol, taken, taken_minute, first_minute, last_minute, peak_rvol, ticks, readings)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb)
        ON CONFLICT (day, channel, symbol) DO UPDATE SET
          taken = EXCLUDED.taken, taken_minute = EXCLUDED.taken_minute,
          first_minute = EXCLUDED.first_minute, last_minute = EXCLUDED.last_minute,
-         peak_rvol = EXCLUDED.peak_rvol, ticks = EXCLUDED.ticks, saved_at = now()`,
+         peak_rvol = EXCLUDED.peak_rvol, ticks = EXCLUDED.ticks, readings = EXCLUDED.readings, saved_at = now()`,
       [r.day, r.channel, r.symbol, r.taken, r.takenMinute, r.firstMinute, r.lastMinute,
-        r.peakRvol, JSON.stringify(r.ticks)],
+        r.peakRvol, JSON.stringify(r.ticks), r.readings ? JSON.stringify(r.readings) : null],
     );
     n += rowCount ?? 0;
   }

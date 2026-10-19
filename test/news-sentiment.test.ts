@@ -35,6 +35,12 @@ describe('news read — which headlines count', () => {
     ]);
   });
 
+  it('keeps more headlines when asked to, for a stock on its results', () => {
+    const many = Array.from({ length: 10 }, (_, i) => ({ heading: `wrap ${i}`, published_time: at(9, i) }));
+    assert.equal(freshHeadlines(many, at(8), at(10)).length, 5);
+    assert.equal(freshHeadlines(many, at(8), at(10), 8).length, 8);
+  });
+
   it('gives the same signature to the same set, so an unchanged stock is not asked again', () => {
     assert.equal(signature(['a', 'b']), signature(['a', 'b']));
     assert.notEqual(signature(['a', 'b']), signature(['a', 'b', 'c']));
@@ -76,6 +82,16 @@ describe('news read — which NSE filings count', () => {
 
   it('drops paperwork, filings from before the window and stocks outside the universe', () => {
     assert.equal(got.size, 2);
+  });
+
+  it('drops an earnings-call recording and a stock option allotment, which said nothing on 19 Oct', () => {
+    const quiet = freshFilings([
+      { symbol: 'FEDERALBNK', desc: 'Updates', an_dt: '13-Oct-2026 19:00:00',
+        attchmntText: 'The Federal Bank Limited has informed the Exchange about audio recording of the earnings call' },
+      { symbol: 'FEDERALBNK', desc: 'Updates', an_dt: '13-Oct-2026 19:05:00',
+        attchmntText: 'The Federal Bank Limited has informed the Exchange about allotment of shares under the stock option scheme' },
+    ], new Set(['FEDERALBNK']), at(15, 30), at(9, 0, 14));
+    assert.equal(quiet.size, 0);
   });
 });
 

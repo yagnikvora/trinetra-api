@@ -39,7 +39,7 @@ import { createHash } from 'node:crypto';
 import { call, tokenSet } from '../../upstox.js';
 import { isSessionDay, istDay, istMinutes, sessionAt, SESSION_CLOSE_MIN, SESSION_OPEN_MIN } from '../session.js';
 import { store, STORE_KEYS } from '../store.js';
-import { previousSession } from './results-calendar.js';
+import { previousSession, resultsTags } from './results-calendar.js';
 import { universe } from './universe.js';
 
 export type NewsLabel = 'positive' | 'negative' | 'neutral';
@@ -89,6 +89,12 @@ const KEYS_PER_REQUEST = 10;
 /** Small on purpose: twenty-five to a request timed out at 90 seconds on the free tier, seven took 50. */
 const SYMBOLS_PER_PROMPT = 8;
 const HEADLINES_PER_SYMBOL = 5;
+/**
+ * More room on a stock trading on its results, so the results story itself is not pushed out by
+ * five newer market wraps that merely name the stock — HCLTECH's own results headline was, on the
+ * morning after it reported.
+ */
+const HEADLINES_ON_RESULTS = 8;
 const FILINGS_PER_SYMBOL = 5;
 const NSE_TIMEOUT_MS = 20_000;
 /**
@@ -101,6 +107,9 @@ const ROUTINE = new RegExp([
   'loss of share certificate', 'duplicate share', 'book closure', 'postal ballot', 'scrutinizer',
   'spurt in volume', 'price movement', 'board meeting intimation', 'change in registered office',
   'copy of annual report', 'monitoring agency', 'statement of deviation', 'link of recording',
+  // FEDERALBNK on 2026-10-19 was read "neutral — routine earnings call audio recording and stock
+  // option allotment" from exactly these two.
+  'audio', 'recording of', 'conference call', 'stock option', 'esos',
 ].join('|'), 'i');
 /** Generous, because nothing waits on it — see the note at the top. */
 const MODEL_TIMEOUT_MS = 90_000;
@@ -141,14 +150,14 @@ let lastModel: string | null = null;
  *
  * Deduplicated on the heading, because a wire story is often carried twice a few minutes apart.
  */
-export function freshHeadlines(items: NewsItem[], fromMs: number, toMs: number): string[] {
+export function freshHeadlines(items: NewsItem[], fromMs: number, toMs: number, max = HEADLINES_PER_SYMBOL): string[] {
   const seen = new Set<string>();
   return [...items]
     .filter((n) => typeof n.published_time === 'number' && n.published_time >= fromMs && n.published_time <= toMs)
     .sort((a, b) => (b.published_time ?? 0) - (a.published_time ?? 0))
     .map((n) => String(n.heading ?? '').replace(/\s+/g, ' ').trim())
     .filter((h) => h.length > 0 && !seen.has(h) && !!seen.add(h))
-    .slice(0, HEADLINES_PER_SYMBOL);
+    .slice(0, max);
 }
 
 const NSE_MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
@@ -342,12 +351,24 @@ async function sweep(nowMs: number): Promise<number> {
   const fromMs = sessionAt(previousSession(day), SESSION_CLOSE_MIN - SESSION_OPEN_MIN);
   const members = (await universe(nowMs)).members;
 
+  // A STOCK ON ITS RESULTS IS READ FROM THE START OF THE PREVIOUS SESSION, not from its close.
+  // FEDERALBNK filed its results at midday on Friday 16 Oct 2026; on Monday the window opened at
+  // Friday's close, the results filing fell outside it, and the read was "neutral" on a stock that
+  // was trading on nothing else. Only results stocks get the longer window: for the rest, news from
+  // yesterday morning has had a full session to be priced.
+  const tagged = new Set((await resultsTags(members.map((m) => m.symbol), nowMs).catch(() => null))?.keys() ?? []);
+  const resultsFromMs = sessionAt(previousSession(day), -SESSION_OPEN_MIN);
+  const fromFor = (symbol: string): number => (tagged.has(symbol) ? resultsFromMs : fromMs);
+
   // NSE first: one request for every company's filings since the last close. When it cannot be
   // read the sweep carries on with headlines alone, and says so in `lastError`.
   let filings = new Map<string, string[]>();
   let nseError: string | null = null;
   try {
-    filings = freshFilings(await nseFilings(previousSession(day), day), new Set(members.map((m) => m.symbol)), fromMs, nowMs);
+    const all = await nseFilings(previousSession(day), day);
+    const symbols = new Set(members.map((m) => m.symbol));
+    filings = freshFilings(all, new Set([...symbols].filter((s) => !tagged.has(s))), fromMs, nowMs);
+    for (const [s, f] of freshFilings(all, new Set([...tagged].filter((s) => symbols.has(s))), resultsFromMs, nowMs)) filings.set(s, f);
   } catch (e) {
     nseError = `NSE filings: ${String((e as Error).message)}`;
   }
@@ -371,7 +392,11 @@ async function sweep(nowMs: number): Promise<number> {
       const data = await call<Record<string, NewsItem[]>>(
         `/v2/news?category=instrument_keys&instrument_keys=${encodeURIComponent(chunk.map((m) => m.equityKey).join(','))}&page_size=100`,
       );
-      for (const m of chunk) consider(m.symbol, freshHeadlines(data[m.equityKey] ?? [], fromMs, nowMs));
+      for (const m of chunk) {
+        consider(m.symbol, freshHeadlines(
+          data[m.equityKey] ?? [], fromFor(m.symbol), nowMs, tagged.has(m.symbol) ? HEADLINES_ON_RESULTS : HEADLINES_PER_SYMBOL,
+        ));
+      }
     } catch (e) {
       // "No data" is Upstox's answer when none of the ten has any news, not a failure: those ten
       // are judged on their filings alone, which is exactly the case the filings are there for.
